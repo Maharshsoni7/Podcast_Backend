@@ -129,101 +129,79 @@ export const extendGraphqlSchema = (schema: any) =>
                 // ==========================
                 getRecommendedPodcasts: async (_, { userId }, context) => {
                     try {
-                        const user = await context.db.User.findOne({
+                        console.log("Fetching recommendations for user ID:", userId);
+
+                        // 1. Fetch User and their interests
+                        const user = await context.query.User.findOne({
                             where: { id: userId },
                             query: "id favoritePodcasts { id title category }",
                         });
 
-                        if (!user) {
-                            throw new Error("User not found");
-                        }
+                        if (!user) throw new Error("User not found");
 
                         const favoritePodcasts = user.favoritePodcasts || [];
-                        const favCategories = [
-                            ...new Set(favoritePodcasts.map((p: any) => p.category)),
-                        ];
+                        const favCategories = [...new Set(favoritePodcasts.map((p) => p.category))];
 
-                        const allPodcast = await context.db.Podcast.findMany({
+                        // 2. Fetch available podcasts to recommend from
+                        const allPodcast = await context.query.Podcast.findMany({
                             query: `
-                id
-                title
-                category
-                video_url
-                audio_url
-                type
-                artwork
-                lyricist
-                artist {
-                  id
-                  name
-                  bio
-                  photo
-                }
-              `,
+                id title category video_url audio_url type artwork lyricist
+                artist { id name bio photo }
+            `,
                         });
 
-                        const favoritePodcastIds = favoritePodcasts.map((p: any) => p.id);
+                        const favoritePodcastIds = favoritePodcasts.map((p) => p.id);
                         const availablePodcast = allPodcast.filter(
-                            (p: any) => !favoritePodcastIds.includes(p.id)
+                            (p) => !favoritePodcastIds.includes(p.id)
                         );
 
                         if (!availablePodcast.length) return [];
 
+                        // 3. Construct a clear prompt for the 2.5/3.1 models
                         const prompt = `
-You are an AI podcast recommendation system.
-The user listens to these categories: ${favCategories.length ? favCategories.join(", ") : "None"
-                            }.
+            You are a podcast recommendation engine. 
+            User interests: ${favCategories.join(", ") || "General"}.
+            
+            Task: Pick exactly 3 podcasts from the list below that match these interests.
+            List:
+            ${availablePodcast.map(p => `- ${p.title} (Category: ${p.category})`).join("\n")}
 
-From the following podcasts, recommend 3:
-${availablePodcast
-                                .map(
-                                    (p: any) =>
-                                        `${p.title} (Category: ${p.category}, Artist: ${p.artist?.name})`
-                                )
-                                .join("\n")}
+            Return ONLY a JSON object with this key: "recommendation" containing an array of titles.
+        `;
 
-Return JSON only:
-{
-  "recommendation": ["Title 1", "Title 2", "Title 3"]
-}
-`;
-
+                        // 4. Call Gemini with JSON Mode enabled
                         const response = await axios.post(
-                            `${GEMINI_API_URL}?key=${API_Key}`,
+                            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
                             {
                                 contents: [{ parts: [{ text: prompt }] }],
+                                generationConfig: {
+                                    responseMimeType: "application/json", // Forces raw JSON output
+                                }
                             },
                             { headers: { "Content-Type": "application/json" } }
                         );
 
-                        const apiText =
-                            response.data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+                        // 5. Direct Parsing (No regex needed because of responseMimeType)
+                        const apiResponseText = response.data.candidates?.[0]?.content?.parts?.[0]?.text;
+                        if (!apiResponseText) throw new Error("Empty AI response");
 
-                        const jsonMatch = apiText.match(/```json\n([\s\S]*?)\n```/);
-                        if (!jsonMatch) throw new Error("Invalid AI response");
+                        const parsedData = JSON.parse(apiResponseText);
+                        const recommendationTitles = parsedData.recommendation;
 
-                        const { recommendation } = JSON.parse(jsonMatch[1]);
-                        if (!Array.isArray(recommendation)) {
-                            throw new Error("Invalid recommendation format");
+                        if (!Array.isArray(recommendationTitles)) {
+                            throw new Error("Invalid recommendation format from AI");
                         }
 
-                        return allPodcast
-                            .filter((p: any) => recommendation.includes(p.title))
-                            .map((p: any) => ({
-                                ...p,
-                                artist: {
-                                    id: "AI",
-                                    name: "AI Generated",
-                                    bio: "AI generated based on your interests",
-                                    photo:
-                                        "https://blog.udemy.com/wp-content/uploads/2020/11/2HoneSkills-620x414.jpg",
-                                },
-                            }));
+                        // 6. Map titles back to full Podcast objects
+                        return allPodcast.filter((p) => recommendationTitles.includes(p.title))
+                            
+
                     } catch (error) {
-                        console.error("AI Podcast Recommendation Error:", error);
+                        // Detailed logging for debugging
+                        console.error("AI Podcast Recommendation Error:", error?.response?.data || error?.message);
                         throw new Error("Failed to get podcast recommendations");
                     }
-                },
+                }
             },
         },
     });
