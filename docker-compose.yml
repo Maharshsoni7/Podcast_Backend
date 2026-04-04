@@ -1,0 +1,17 @@
+version: '3.9'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: podcast_server
+    ports:
+      - "4000:3000"
+    networks:
+      - podcast-network
+    restart: unless-stopped
+
+networks:
+  podcast-network:
+    driver: bridge
